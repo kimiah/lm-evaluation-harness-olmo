@@ -39,7 +39,7 @@ dependencies = [
     "dill",
     "word2number",
     "more_itertools",
-    "ai2-olmo",
+    "ai2-olmo"
 ]
 
 [tool.setuptools.packages.find]
