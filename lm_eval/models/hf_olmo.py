@@ -3,6 +3,7 @@ from typing import Optional, Union, List
 from pathlib import Path
 
 import torch
+import transformers
 from hf_olmo import (
     OLMoForCausalLM,
     OLMoTokenizerFast,
@@ -11,6 +12,11 @@ from hf_olmo import (
 
 from lm_eval.models.huggingface import HFLM
 from lm_eval.api.registry import register_model
+
+try:
+    from transformers.quantizers.auto import AutoQuantizationConfig
+except ImportError:
+    AutoQuantizationConfig = None
 
 eval_logger = logging.getLogger(__name__)
 
@@ -27,14 +33,18 @@ class OLMoLM(HFLM):
         revision: str = "main",
         trust_remote_code: bool = False,
         gguf_file: Optional[str] = None,
+        subfolder: str = "",
     ) -> None:
         """
         Load OLMo config.
         """
+        # Handle None values
+        revision = revision or "main"
+        
         self._config = OLMoConfig.from_pretrained(
             pretrained,
-            revision=revision,
-            trust_remote_code=trust_remote_code,
+            revision=revision or "main",
+            trust_remote_code=trust_remote_code or False,
         )
 
     def _get_backend(
@@ -67,6 +77,7 @@ class OLMoLM(HFLM):
         gptqmodel: Optional[bool] = False,
         gguf_file: Optional[str] = None,
         quantization_config: Optional[dict] = None,
+        subfolder: str = "",
         **kwargs,
     ) -> None:
         """
@@ -99,16 +110,21 @@ class OLMoLM(HFLM):
     def _create_tokenizer(
         self,
         pretrained: Union[str, torch.nn.Module],
-        tokenizer: Optional[Union[str, OLMoTokenizerFast]] = None,
+        tokenizer: Optional[Union[str, object]] = None,
         revision: Optional[str] = "main",
         trust_remote_code: Optional[bool] = False,
         use_fast_tokenizer: Optional[bool] = True,
         gguf_file: Optional[str] = None,
         add_bos_token: Optional[bool] = False,
+        subfolder: Optional[str] = "",
     ) -> None:
         """
         Load OLMo tokenizer.
         """
+        # Handle None values
+        revision = revision or "main"
+        trust_remote_code = trust_remote_code if trust_remote_code is not None else False
+        
         if tokenizer:
             if isinstance(tokenizer, str):
                 self.tokenizer = OLMoTokenizerFast.from_pretrained(
@@ -119,14 +135,14 @@ class OLMoLM(HFLM):
             else:
                 self.tokenizer = tokenizer
         else:
-            model_name = pretrained if isinstance(pretrained, str) else self.model.name_or_path
+            model_name = pretrained if isinstance(pretrained, str) else getattr(self.model, 'name_or_path', str(pretrained))
             self.tokenizer = OLMoTokenizerFast.from_pretrained(
-                model_name,
+                str(model_name),
                 revision=revision,
                 trust_remote_code=trust_remote_code,
             )
 
-        if add_bos_token:
+        if add_bos_token and hasattr(self.tokenizer, 'add_bos_token'):
             self.tokenizer.add_bos_token = True
 
     def _model_call(self, inps, attn_mask=None, labels=None):
