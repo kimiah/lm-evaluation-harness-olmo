@@ -172,21 +172,6 @@ class OLMoLM(HFLM):
 
         results: List[str] = []
 
-        # Try to access the inner OLMo model that has the generate method
-        olmo_model = None
-        try:
-            # First try to access the inner model
-            olmo_model = self.model.model  # type: ignore[attr-defined]
-            if not hasattr(olmo_model, 'generate'):
-                olmo_model = None
-        except AttributeError:
-            olmo_model = None
-
-        # If we can't access the inner model with generate, fallback to manual generation
-        if olmo_model is None:
-            eval_logger.warning("Could not access OLMo's native generate method. Using token-by-token generation.")
-            return self._manual_generate_until(requests, disable_tqdm)
-
         for req in tqdm(requests, disable=disable_tqdm, desc="OLMo generate_until"):
             context: str = req.args[0]
             until: List[str] = req.args[1]
@@ -195,80 +180,29 @@ class OLMoLM(HFLM):
             # Encode context.
             ctx_ids = torch.tensor([self.tok_encode(context)], device=device)
 
+            # Call the *inner* OLMo model's generate (self.model is OLMoForCausalLM).
             try:
-                gen_out = olmo_model.generate(
-                    ctx_ids,
-                    max_steps=max_tokens,
-                    beam_size=1,  # greedy by default; user can tweak later via kwargs
-                )
+                olmo_model = self.model.model  # type: ignore[attr-defined]
+            except AttributeError:
+                # Fallback to slow greedy decoding if wrapper structure changes.
+                return super().generate_until(requests, disable_tqdm)
 
-                # `token_ids` includes *only* generated tokens, not the prompt.
-                gen_ids = gen_out.token_ids[0, 0].tolist()
-                gen_text = self.tok_decode(gen_ids)
+            gen_out = olmo_model.generate(
+                ctx_ids,
+                max_steps=max_tokens,
+                beam_size=1,  # greedy by default; user can tweak later via kwargs
+            )
 
-                # Apply until-stop trimming.
-                for stop_seq in until:
-                    if stop_seq and stop_seq in gen_text:
-                        gen_text = gen_text.split(stop_seq)[0]
-                        break
+            # `token_ids` includes *only* generated tokens, not the prompt.
+            gen_ids = gen_out.token_ids[0, 0].tolist()
+            gen_text = self.tok_decode(gen_ids)
 
-                results.append(gen_text)
-            except Exception as e:
-                eval_logger.warning(f"OLMo native generation failed: {e}. Falling back to manual generation.")
-                # return self._manual_generate_until(requests, disable_tqdm)
+            # Apply until-stop trimming.
+            for stop_seq in until:
+                if stop_seq and stop_seq in gen_text:
+                    gen_text = gen_text.split(stop_seq)[0]
+                    break
 
-        return results
-
-    def _manual_generate_until(self, requests, disable_tqdm: bool = False):
-        """Manual token-by-token generation for OLMo when native generate is unavailable."""
-        if not requests:
-            return []
-
-        import torch
-        from tqdm import tqdm
-
-        device = next(self.model.parameters()).device
-        results: List[str] = []
-
-        for req in tqdm(requests, disable=disable_tqdm, desc="OLMo manual generation"):
-            context: str = req.args[0]
-            until: List[str] = req.args[1]
-            max_tokens: int = getattr(req, "max_tokens", 128)
-
-            # Encode context
-            ctx_ids = torch.tensor([self.tok_encode(context)], device=device, dtype=torch.long)
-            
-            generated_text = ""
-            current_ids = ctx_ids.clone()
-            
-            for _ in range(max_tokens):
-                with torch.no_grad():
-                    # Get logits from the model
-                    outputs = self.model(current_ids)
-                    logits = outputs.logits
-                    
-                    # Get the last token's logits and sample the next token (greedy)
-                    next_token_logits = logits[0, -1, :]
-                    next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(0).unsqueeze(0)
-                    
-                    # Decode the new token
-                    next_token_text = self.tok_decode([next_token_id.item()])
-                    generated_text += next_token_text
-                    
-                    # Check for stop sequences
-                    should_stop = False
-                    for stop_seq in until:
-                        if stop_seq and stop_seq in generated_text:
-                            generated_text = generated_text.split(stop_seq)[0]
-                            should_stop = True
-                            break
-                    
-                    if should_stop:
-                        break
-                    
-                    # Append the new token and continue
-                    current_ids = torch.cat([current_ids, next_token_id], dim=1)
-            
-            results.append(generated_text)
+            results.append(gen_text)
 
         return results
